@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ast import Break
+from email.policy import default
 import os
 from collections.abc import Iterable
 from typing import IO, Any, BinaryIO
@@ -8,6 +10,8 @@ import numpy.typing as npt
 import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
+from collections import defaultdict
+import regex as re
 
 
 def run_linear(
@@ -561,32 +565,92 @@ def get_tokenizer(
     """
     raise NotImplementedError
 
+import logging
+from tqdm import tqdm
 
-def run_train_bpe(
-    input_path: str | os.PathLike,
-    vocab_size: int,
-    special_tokens: list[str],
-    **kwargs,
-) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
-    """Given the path to an input corpus, run train a BPE tokenizer and
-    output its vocabulary and merges.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
 
-    Args:
-        input_path (str | os.PathLike): Path to BPE tokenizer training data.
-        vocab_size (int): Total number of items in the tokenizer's vocabulary (including special tokens).
-        special_tokens (list[str]): A list of string special tokens to be added to the tokenizer vocabulary.
-            These strings will never be split into multiple tokens, and will always be
-            kept as a single token. If these special tokens occur in the `input_path`,
-            they are treated as any other string.
 
-    Returns:
-        tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
-            vocab:
-                The trained tokenizer vocabulary, a mapping from int (token ID in the vocabulary)
-                to bytes (token bytes)
-            merges:
-                BPE merges. Each list item is a tuple of bytes (<token1>, <token2>),
-                representing that <token1> was merged with <token2>.
-                Merges are ordered by order of creation.
-    """
-    raise NotImplementedError
+def run_train_bpe(input_path, vocab_size, special_tokens, **kwargs):
+    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+    vocab: dict[int, bytes] = {i: bytes([i]) for i in range(256)}
+    merges: list[tuple[bytes, bytes]] = []
+
+    # ---- 预分词 ----
+    logger.info("Reading corpus from %s ...", input_path)
+    with open(input_path, "r", encoding="utf-8") as f:
+        text = f.read()
+    logger.info("Corpus size: %.2f MB", len(text.encode("utf-8")) / 1e6)
+
+    sep = "|".join(re.escape(i) for i in special_tokens)
+    chunks = re.split(sep, text) if sep else [text]   # sep 为空时别 split,否则会按每个字符切
+
+    word_freqs: dict[tuple[bytes, ...], int] = defaultdict(int)
+    for chunk in tqdm(chunks, desc="Pre-tokenizing", unit="chunk"):
+        for match in re.finditer(PAT, chunk):
+            word_freqs[tuple(bytes([b]) for b in match.group().encode("utf-8"))] += 1
+    logger.info("Unique pre-tokens: %d", len(word_freqs))
+
+    # ---- 初始 pair 统计 + 倒排 index ----
+    words = [list(w) for w in word_freqs]
+    freqs = [word_freqs[w] for w in word_freqs]
+
+    pair_counts: dict[tuple[bytes, bytes], int] = defaultdict(int)
+    pair_to_words: dict[tuple[bytes, bytes], set[int]] = defaultdict(set)
+    for i, word in enumerate(words):
+        f = freqs[i]
+        for x, y in zip(word[:-1], word[1:]):
+            pair_counts[(x, y)] += f
+            pair_to_words[(x, y)].add(i)
+
+    # ---- 合并循环 ----
+    target_vocab = vocab_size - len(special_tokens)
+    pbar = tqdm(total=max(0, target_vocab - len(vocab)), desc="BPE merges", unit="merge")
+    while len(vocab) < target_vocab:
+        if not pair_counts:
+            break
+
+        # 关键改动:用 max 取最大,O(P);不要用 sorted 全排序 O(P log P)
+        great_merge = max(pair_counts, key=lambda p: (pair_counts[p], p))
+        a, b = great_merge
+        comb = a + b
+        vocab[len(vocab)] = comb
+        merges.append(great_merge)
+
+        for idx in list(pair_to_words[great_merge]):
+            word = words[idx]
+            f = freqs[idx]
+            for x, y in zip(word[:-1], word[1:]):
+                pair_counts[(x, y)] -= f
+                if pair_counts[(x, y)] <= 0:
+                    del pair_counts[(x, y)]
+                pair_to_words[(x, y)].discard(idx)
+
+            new_word, i = [], 0
+            while i < len(word):
+                if i < len(word) - 1 and word[i] == a and word[i + 1] == b:
+                    new_word.append(comb)
+                    i += 2
+                else:
+                    new_word.append(word[i])
+                    i += 1
+            words[idx] = new_word
+
+            for x, y in zip(new_word[:-1], new_word[1:]):
+                pair_counts[(x, y)] += f
+                pair_to_words[(x, y)].add(idx)
+
+        pair_to_words.pop(great_merge, None)
+
+        pbar.update(1)
+        if len(merges) % 100 == 0:                       # 每 100 次刷一下当前状态,别每步都刷拖慢
+            pbar.set_postfix(vocab=len(vocab), last=str(comb)[:16])
+    pbar.close()
+
+    logger.info("Done. merges=%d, vocab(pre-special)=%d", len(merges), len(vocab))
+
+    for t in special_tokens:
+        vocab[len(vocab)] = t.encode("utf-8")
+    return vocab, merges
