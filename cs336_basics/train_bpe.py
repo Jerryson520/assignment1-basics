@@ -23,8 +23,8 @@ PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s
 def gpt_byte_encoder() -> dict[int, str]:
     bs = (
         list(range(ord("!"), ord("~") + 1))
-        + list(range(ord("¡"), ord("¬") + 1))
-        + list(range(ord("®"), ord("ÿ") + 1))
+        + list(range(ord("\u00a1"), ord("\u00ac") + 1))
+        + list(range(ord("\u00ae"), ord("\u00ff") + 1))
     )
     cs = bs[:]
     n = 0
@@ -53,7 +53,7 @@ class HeapItem:
 
 def process_chunk(args):
     """
-    每一个worker自己读文件并切分
+    \u6bcf\u4e00\u4e2aworker\u81ea\u5df1\u8bfb\u6587\u4ef6\u5e76\u5207\u5206
     """
     path, start, end, special_tokens = args
     with open(path, "rb") as f:
@@ -72,18 +72,30 @@ def process_chunk(args):
             word_freqs[encoded_word] += 1
     return word_freqs
 
-def merge_word(word: list[bytes], a: bytes, b: bytes, comb: bytes) -> list[bytes]:
+def merge_word(word: list[bytes], a: bytes, b: bytes, comb: bytes, delta: dict[tuple[bytes, bytes], int], f: int) -> tuple[list[bytes], bool]:
     out: list[bytes] = []
     i = 0
     n = len(word)
+    changed = False
     while i < n:
         if i < n-1 and word[i] == a and word[i+1] == b:
+            changed = True
+            if i > 0:
+                # \u7d27\u90bb\u4e0a\u4e00\u4e2a\u5408\u5e76\u70b9\u65f6 out[-1] \u624d\u662f comb\uff0c\u5426\u5219\u7528\u539f\u8bcd\u5de6\u90bb\u5c45
+                left = comb if (out and out[-1] == comb and word[i-1] == b) else word[i-1]
+                delta[(left, a)] -= f
+                delta[(left, comb)] += f
+            if i + 2 < n:
+                right = word[i+2]
+                delta[(b, right)] -= f
+                delta[(comb, right)] += f
+            delta[(a, b)] -= f
             out.append(comb)
             i += 2
         else:
             out.append(word[i])
             i += 1
-    return out
+    return out, changed
 
 
 class BPETokenizer:
@@ -99,11 +111,7 @@ class BPETokenizer:
 
     def _pretokenize(self):
         t0 = time.perf_counter()
-        # with open(self.input_path, 'r', encoding='utf-8') as f:
-        #     input = f.read()
-        # word_freqs = self._pre_tokenize(input)
- 
-        # ---- 阶段 1: 多进程预分词 (耗时大头, 之前完全没日志) ----
+        # ---- \u9636\u6bb5 1: \u591a\u8fdb\u7a0b\u9884\u5206\u8bcd ----
         t_pre = time.perf_counter()
         logger.info("Pre-tokenizing with multiprocessing Pool ...")
         with open(self.input_path, "rb") as f:
@@ -125,7 +133,7 @@ class BPETokenizer:
                     for w, c in freq.items():
                         word_freqs[w] += c
         except Exception:
-            logger.exception("多进程预分词失败")
+            logger.exception("\u591a\u8fdb\u7a0b\u9884\u5206\u8bcd\u5931\u8d25")
             raise
 
         logger.info(
@@ -151,7 +159,7 @@ class BPETokenizer:
  
         word_freqs = self._pretokenize()
         if not word_freqs:
-            logger.warning("空输入, 直接返回基础 vocab")
+            logger.warning("\u7a7a\u8f93\u5165, \u76f4\u63a5\u8fd4\u56de\u57fa\u7840 vocab")
             for tok in self.special_tokens:
                 self.vocab[len(self.vocab)] = tok.encode("utf-8")
             return self.vocab, self.merges
@@ -185,49 +193,45 @@ class BPETokenizer:
             self.vocab[len(self.vocab)] = comb
             self.merges.append((a,b))
             done += 1
-            # 每 500 步在进度条上挂一点当前状态,方便扫一眼
+            # \u6bcf 500 \u6b65\u5728\u8fdb\u5ea6\u6761\u4e0a\u6302\u4e00\u70b9\u5f53\u524d\u72b6\u6001
             if step % 500 == 0:
                 pbar.set_postfix(
                     best=comb.decode("utf-8", errors="replace")[:12],
                     count=self.pair_counts.get(best, 0),
                     pairs=len(self.pair_counts),
                 )
-            affected = list(self.pair_to_word[best])
+            # pop \u53d6\u51fa best \u7684\u5012\u6392\uff0c\u540c\u65f6\u628a\u5b83\u4ece\u7d22\u5f15\u91cc\u5220\u6389
+            affected = self.pair_to_word.pop(best, set())
+            delta: dict[tuple[bytes, bytes], int] = defaultdict(int)
 
             for idx in affected:
                 word = words[idx]
                 f = freqs[idx]
-
-                old_pairs = Counter(zip(word[:-1], word[1:]))
-                new_word = merge_word(word, a, b, comb)
+                new_word, changed = merge_word(word, a, b, comb, delta, f)
+                # \u5012\u6392\u91cc\u6b8b\u7559\u7684\u810f idx\uff08\u5b9e\u9645\u5df2\u4e0d\u542b best\uff09\uff0c\u8df3\u8fc7
+                if not changed:
+                    continue
                 words[idx] = new_word
-                new_pairs = Counter(zip(new_word[:-1], new_word[1:]))
 
+                # \u7ef4\u62a4\u5012\u6392 pair_to_word\uff1a\u53ea\u767b\u8bb0 comb \u76f8\u5173\u7684\u65b0 pair
+                for x, y in zip(new_word, new_word[1:]):
+                    if x == comb or y == comb:
+                        self.pair_to_word[(x, y)].add(idx)
 
-                for pair in old_pairs | new_pairs:
-                    delta = (new_pairs[pair] - old_pairs[pair]) * f
-                    if delta:
-                        new_count = self.pair_counts[pair] + delta
-                        if new_count <= 0:
-                            self.pair_counts.pop(pair, None)
-                        else:
-                            self.pair_counts[pair] = new_count
-                            heapq.heappush(heap, HeapItem(new_count, pair))
-            
-                    in_old = pair in old_pairs
-                    in_new = pair in new_pairs
-                    if in_new and not in_old:
-                        self.pair_to_word.setdefault(pair, set()).add(idx)
-                    elif in_old and not in_new:
-                        s = self.pair_to_word.get(pair)
-                        if s is not None:
-                            s.discard(idx)
-                            if not s:               # 空 set 立即回收
-                                del self.pair_to_word[pair]
+            # \u4e00\u6b21\u6027\u5e94\u7528 delta \u5230 pair_counts + heap
+            for pair, d in delta.items():
+                if d == 0:
+                    continue
+                new_count = self.pair_counts.get(pair, 0) + d
+                if new_count <= 0:
+                    self.pair_counts.pop(pair, None)
+                    self.pair_to_word.pop(pair, None)
+                else:
+                    self.pair_counts[pair] = new_count
+                    heapq.heappush(heap, HeapItem(new_count, pair))
                 
-                # best 已被全部消费
+            # best \u7684 pair_to_word \u5df2\u5728\u4e0a\u9762 pop\uff0c\u8fd9\u91cc\u53ea\u6e05 count
             self.pair_counts.pop(best, None)
-            self.pair_to_word.pop(best, None)
  
         dt_merge = time.perf_counter() - t_merge
         rate = done / dt_merge if dt_merge > 0 else 0.0
@@ -239,27 +243,27 @@ class BPETokenizer:
         for tok in self.special_tokens:
             self.vocab[len(self.vocab)] = tok.encode("utf-8")
  
-        self._log_summary(t0)
+        logger.info("BPE done, total elapsed=%.1fs", time.perf_counter() - t0)
         return self.vocab, self.merges
 
 def save_outputs(vocab, merges, out_dir="."):
-    # 1) 无损二进制, 保证完美 round-trip
+    # 1) \u65e0\u635f\u4e8c\u8fdb\u5236, \u4fdd\u8bc1\u5b8c\u7f8e round-trip
     with open(os.path.join(out_dir, "bpe.pkl"), "wb") as f:
         pickle.dump({"vocab": vocab, "merges": merges}, f)
  
-    # 2) 可读且可逆的 vocab.json
+    # 2) \u53ef\u8bfb\u4e14\u53ef\u9006\u7684 vocab.json
     readable = {str(k): encode_token(v) for k, v in vocab.items()}
     with open(os.path.join(out_dir, "vocab.json"), "w", encoding="utf-8") as f:
         json.dump(readable, f, ensure_ascii=False, indent=2)
  
-    # 3) 可读且可逆的 merges.txt (token 内无空格, 故空格分隔安全)
+    # 3) \u53ef\u8bfb\u4e14\u53ef\u9006\u7684 merges.txt
     with open(os.path.join(out_dir, "merges.txt"), "w", encoding="utf-8") as f:
         for a, b in merges:
             f.write(f"{encode_token(a)} {encode_token(b)}\n")
 
 
 class TqdmLoggingHandler(logging.Handler):
-    """让 logging 通过 tqdm.write 输出, 不会冲掉进度条。"""
+    """\u8ba9 logging \u901a\u8fc7 tqdm.write \u8f93\u51fa, \u4e0d\u4f1a\u51b2\u6389\u8fdb\u5ea6\u6761\u3002"""
  
     def emit(self, record):
         try:
@@ -282,14 +286,14 @@ if __name__ == "__main__":
         level=os.environ.get("LOGLEVEL", "INFO").upper(), handlers=[handler]
     )
     tracemalloc.start()   
-    input_path = "data/owt_valid.txt"
-    vocab_size = 10000
+    input_path = "data/TinyStoriesV2-GPT4-train.txt"
+    vocab_size = 32000
     special_tokens = ["<|endoftext|>"]
     tokenizer = BPETokenizer(input_path, vocab_size, special_tokens)
     vocab, merges = tokenizer.merge()
  
     current, peak = tracemalloc.get_traced_memory()
-    logger.info("内存: 当前 %.1f MB, 峰值 %.1f MB", current / 1e6, peak / 1e6)
+    logger.info("\u5185\u5b58: \u5f53\u524d %.1f MB, \u5cf0\u503c %.1f MB", current / 1e6, peak / 1e6)
     tracemalloc.stop()
  
     save_outputs(vocab, merges)

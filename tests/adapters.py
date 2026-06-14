@@ -12,6 +12,7 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 from collections import defaultdict
 import regex as re
+from cs336_basics.bpe_tokenizer import BPETokenizer
 
 
 def run_linear(
@@ -542,7 +543,6 @@ def run_load_checkpoint(
     """
     raise NotImplementedError
 
-
 def get_tokenizer(
     vocab: dict[int, bytes],
     merges: list[tuple[bytes, bytes]],
@@ -563,13 +563,8 @@ def get_tokenizer(
     Returns:
         A BPE tokenizer that uses the provided vocab, merges, and special tokens.
     """
-    raise NotImplementedError
-
-import logging
-from tqdm import tqdm
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-logger = logging.getLogger(__name__)
+    return BPETokenizer(vocab, merges, special_tokens)
+    
 
 
 def run_train_bpe(input_path, vocab_size, special_tokens, **kwargs):
