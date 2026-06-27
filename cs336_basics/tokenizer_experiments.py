@@ -2,6 +2,8 @@ from bpe_tokenizer import BPETokenizer
 import random
 import logging
 import time
+import os
+import tempfile
 from multiprocessing import Pool
 logger = logging.getLogger("tokenizer_experiments")
 
@@ -20,6 +22,7 @@ def shuffle_samples(file_input_path: str, k: int = 10, seed: int = 42, sep: str=
     def flush():
         nonlocal n, buff
         doc = "".join(buff).strip()
+        buff.clear()
         if not doc: return
         if len(samples) < k:
             samples.append(doc)
@@ -31,12 +34,12 @@ def shuffle_samples(file_input_path: str, k: int = 10, seed: int = 42, sep: str=
 
     with open(file_input_path, "r", encoding="utf-8") as f:
         for line in f:
-            if not line.strip():
-                continue
-            if line.strip() == sep:
-                flush()
-            else:
-                buff.append(line)
+            # sep 可能内联在行内（如 OWT），按 sep 切分；每个 sep 标记一篇文档结束
+            parts = line.split(sep)
+            for i, part in enumerate(parts):
+                buff.append(part)
+                if i < len(parts) - 1:
+                    flush()
         flush()
     logger.info(
         "Sampled %d/%d docs from %s in %.2fs",
@@ -83,6 +86,51 @@ def mean_compression_ratio(name: str, samples: list[str], encoder, use_mp: bool 
     return mean
 
 
+PILE_BYTES = 825 * 1024**3  # 825 GB
+
+def measure_throughput(name: str, file_path: str, encoder, nchars: int = 10_000_000,
+                       num_processes: int = 8) -> float:
+    """多进程吞吐：截取 nchars 字符到临时文件，用 encode_file 并行编码计时。"""
+    # encode_file 接收的是文件路径，所以先把样本截到临时文件
+    with open(file_path, "r", encoding="utf-8") as f:
+        text = f.read(nchars)
+    nbytes = len(text.encode("utf-8"))
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", delete=False) as tf:
+        tf.write(text)
+        tmp_path = tf.name
+
+    try:
+        t0 = time.perf_counter()
+        n_tokens = len(encoder.encode_file(tmp_path, num_processes=num_processes))
+        elapsed = time.perf_counter() - t0
+    finally:
+        os.remove(tmp_path)
+
+    bps = nbytes / elapsed
+    pile_seconds = PILE_BYTES / bps
+    print(f"{name}: {bps/1e6:.2f} MB/s "
+          f"({nbytes} bytes, {n_tokens} tokens, {elapsed:.2f}s, {num_processes} procs) | "
+          f"Pile(825GB) ≈ {pile_seconds/3600:.1f} h ({pile_seconds/86400:.1f} days)")
+    return bps
+
+def encode_to_npy(name: str, tokenizer, in_path: str, out_path: str,
+                  num_processes: int = 8) -> int:
+    """带日志地把整个文件并行编码并落盘为 .npy，记录耗时、token 数、吞吐与文件大小。"""
+    in_bytes = os.path.getsize(in_path)
+    logger.info("[%s] Encoding %s (%.2f GB) -> %s with %d procs ...",
+                name, in_path, in_bytes / 1024**3, out_path, num_processes)
+    t0 = time.perf_counter()
+    total = tokenizer.encode_file_to_npy(in_path, out_path, num_processes=num_processes)
+    elapsed = time.perf_counter() - t0
+    out_bytes = os.path.getsize(out_path)
+    logger.info(
+        "[%s] Done: %d tokens in %.1fs (%.2f MB/s) | %s = %.2f GB (%.3f bytes/token)",
+        name, total, elapsed, in_bytes / 1e6 / elapsed,
+        out_path, out_bytes / 1024**3, in_bytes / total if total else 0.0,
+    )
+    return total
+
+
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
@@ -91,30 +139,46 @@ if __name__ == "__main__":
     )
 
     owt_data = "data/owt_train.txt"
+    owt_valid = "data/owt_valid.txt"
     owt_vocab, owt_merges = "results/owt/vocab.json", "results/owt/merges.txt"
     tinystory_data = "data/TinyStoriesV2-GPT4-train.txt"
+    tinystory_valid = "data/TinyStoriesV2-GPT4-valid.txt"
     tinystory_vocab, tinystory_merges = "results/tinystories/vocab.json", "results/tinystories/merges.txt"
     special_tokens = ["<|endoftext|>"]
 
-    # ====== stage1: bytes/token ratio ======
-    logger.info("===== Stage 1: compression ratio =====")
-    owt_10 = shuffle_samples(owt_data)
-    tinystory_10 = shuffle_samples(tinystory_data)
+    # stage1/2 才需要采样；只跑 stage4 时跳过，省去几十秒采样耗时
+    # logger.info("===== Stage 1: compression ratio =====")
+    # owt_10 = shuffle_samples(owt_data)
+    # tinystory_10 = shuffle_samples(tinystory_data)
 
     logger.info("Loading OpenWebText tokenizer from %s / %s", owt_vocab, owt_merges)
     owt_tokenizer = BPETokenizer.from_files(owt_vocab, owt_merges, special_tokens)
     logger.info("Loading TinyStories tokenizer from %s / %s", tinystory_vocab, tinystory_merges)
     tinystory_tokenizer = BPETokenizer.from_files(tinystory_vocab, tinystory_merges, special_tokens)
 
-    owt_compression_ratio = mean_compression_ratio("OpenWebText", owt_10, owt_tokenizer)
-    tinystory_compression_ratio = mean_compression_ratio("TinyStories", tinystory_10, tinystory_tokenizer)
+    # # ====== stage1: bytes/token ratio ======
+    # owt_compression_ratio = mean_compression_ratio("OpenWebText", owt_10, owt_tokenizer)
+    # tinystory_compression_ratio = mean_compression_ratio("TinyStories", tinystory_10, tinystory_tokenizer)
 
-    logger.info("OpenWebText compression ratio: %.3f bytes/token", owt_compression_ratio)
-    logger.info("TinyStories compression ratio: %.3f bytes/token", tinystory_compression_ratio)
+    # logger.info("OpenWebText compression ratio: %.3f bytes/token", owt_compression_ratio)
+    # logger.info("TinyStories compression ratio: %.3f bytes/token", tinystory_compression_ratio)
 
-    # ====== stage2: cross-tokenizer ======
-    owt_compression_ratio = mean_compression_ratio("OpenWebText", owt_10, tinystory_tokenizer)
-    tinystory_compression_ratio = mean_compression_ratio("TinyStories", tinystory_10, owt_tokenizer)
+    # # ====== stage2: cross-tokenizer ======
+    # owt_compression_ratio = mean_compression_ratio("OpenWebText", owt_10, tinystory_tokenizer)
+    # tinystory_compression_ratio = mean_compression_ratio("TinyStories", tinystory_10, owt_tokenizer)
 
-    logger.info("OpenWebText compression ratio: %.3f bytes/token", owt_compression_ratio)
-    logger.info("TinyStories compression ratio: %.3f bytes/token", tinystory_compression_ratio)
+    # logger.info("OpenWebText compression ratio: %.3f bytes/token", owt_compression_ratio)
+    # logger.info("TinyStories compression ratio: %.3f bytes/token", tinystory_compression_ratio)
+
+    # # ====== stage3: throughput & Pile estimate ======
+    # logger.info("===== Stage 3: throughput =====")
+    # measure_throughput("OpenWebText", owt_data, owt_tokenizer)
+    # measure_throughput("TinyStories", tinystory_data, tinystory_tokenizer)
+
+    # ====== stage4: 编码训练/验证集为 token id 序列并落盘 ======
+    logger.info("===== Stage 4: encode datasets to .npy =====")
+    encode_to_npy("TinyStories/valid", tinystory_tokenizer, tinystory_valid, "results/ts_valid_ids.npy", num_processes=8)
+    encode_to_npy("OpenWebText/valid", owt_tokenizer, owt_valid, "results/owt_valid_ids.npy", num_processes=8)
+
+    encode_to_npy("OpenWebText/train", owt_tokenizer, owt_data, "results/owt_train_ids.npy", num_processes=8)
+    encode_to_npy("TinyStories/train", tinystory_tokenizer, tinystory_data, "results/ts_train_ids.npy", num_processes=8)

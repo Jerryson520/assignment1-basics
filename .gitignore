@@ -162,3 +162,12 @@ cython_debug/
 .ruff_cache/
 *.zip
 data/
+
+# experiment artifacts
+wandb/
+checkpoint/
+*.npy
+*.pkl
+
+# macOS
+.DS_Store

@@ -18,3 +18,146 @@
 ### Notes
 - Well under the 2-minute target.
 - No single-process baseline recorded yet — consider running once with the old `_pre_tokenize` for a clean comparison.
+
+---
+
+# 分词器实验（§2.7）
+
+## 2026-06-14 — 压缩率
+
+- **脚本**：`cs336_basics/tokenizer_experiments.py`
+- **采样**：蓄水池采样，每个数据集 10 篇文档，seed=42，分隔符 `<|endoftext|>`
+- **分词器**：TinyStories（10K 词表）、OpenWebText（32K 词表）
+
+### (a) 各分词器在自身数据集上
+
+| 数据集 | 分词器 | 平均 bytes/token | 最小 | 最大 |
+|---|---|---|---|---|
+| TinyStories | TinyStories (10K) | 4.150 | 3.725 | 4.451 |
+| OpenWebText | OpenWebText (32K) | 4.502 | 4.094 | 5.172 |
+
+**答**：在各自匹配的分词器下，TinyStories 的压缩率约 **4.15 bytes/token**，OpenWebText 约 **4.50 bytes/token**；OWT 更高是因为其词表更大（32K vs 10K），能把更多常见子串合并成单个 token。
+
+### (b) 交叉分词（用错配的分词器）
+
+| 样本 | 分词器 | 平均 bytes/token | 对比自身 |
+|---|---|---|---|
+| OpenWebText | TinyStories (10K) | 3.306 | 4.502 → 下降约 27% |
+| TinyStories | OpenWebText (32K) | 4.061 | 4.150 → 下降约 2% |
+
+**答**：用 TinyStories 分词器编码 OWT 样本时，压缩率从 4.50 降到 **3.31 bytes/token**（变差约 27%），因为 10K 小词表是在简单的儿童故事语料上训练的，缺少 OWT 多样化文本所需的 merge，导致文本被切成更多更短的 token；反向（OWT 分词器编码 TinyStories）只降到 4.06（变差约 2%），因为 32K 大词表已基本覆盖 TinyStories 的简单词汇。这种不对称说明：小而专的词表换到域外文本上会显著退化，而大而泛的词表对简单域几乎无损。
+
+### (c) 吞吐量与 Pile(825GB) 估时
+
+- **方法**：截取连续文本，只对编码计时，吞吐 = 字节数 / 耗时；Pile 估时 = `825 GiB / 吞吐`。
+- **环境**：8 物理核 = 8 逻辑核（无超线程）。
+- **三种实现**：串行 `encode`；并行 `encode_file`（`find_chunk_boundaries` 在 `<|endoftext|>` 切 8 块 + `Pool.map`，结果回传内存）；并行落盘 `encode_file_to_npy`（同样切块，但 worker 把分片写盘、主进程顺序合并）。
+
+**OpenWebText (32K)，100MB 样本：**
+
+| 实现 | 吞吐 | 耗时 | 加速 | Pile(825GB) 估时 |
+|---|---|---|---|---|
+| 串行 `encode` | 0.49 MB/s | 207s | 1x | ~20 天 |
+| 并行 `encode_file` | 1.26 MB/s | 80s | 2.6x | ~7.6 天 |
+| 并行 `encode_file_to_npy` | 1.31 MB/s | 77s | 2.7x | ~7.3 天 |
+
+（单进程吞吐随样本/机器负载在 0.49–0.72 MB/s 间波动；TinyStories 略快于 OWT，因 10K 词表 merge 更少。）
+
+**重训 10K TinyStories 后的并行复测（10MB 样本，8 进程，`encode_file`）：**
+
+| 分词器 | 吞吐 | 耗时 | Pile(825GB) 估时 |
+|---|---|---|---|
+| OpenWebText (32K) | 1.96 MB/s | 5.14s | ~5.2 天 |
+| TinyStories (10K) | 2.20 MB/s | 4.54s | ~4.7 天 |
+
+（本次机器负载更轻，绝对吞吐高于上面的 100MB 表；趋势一致：TinyStories 词表小、merge 少，吞吐更高。）
+
+**答**：单进程吞吐约 **0.5–0.7 MB/s**，外推编码整个 Pile（825GB）约需 **14–20 天**；改用 8 进程并行后提升到约 **1.3 MB/s**，Pile 降到约 **7 天**（约 2.7x）。
+
+> **关于加速上限的修正**：并行只到 ~2.7x，远未达 8 核理论上限。最初猜测"瓶颈是几千万 token id 从 worker pickle 回主进程的串行回传"——经落盘版验证**此猜测错误**：消除回传后加速仅从 2.6x→2.7x。真实瓶颈更可能是 **(1) 只切 8 块=进程数，块大小不均时总耗时被最慢的块拖住（无法负载均衡）；(2) 每个任务都把 32K 词表 pickle 一份给 worker 的启动开销**。进一步优化方向：切更多块（如 64）+ `Pool(initializer=...)` 只发一次词表。
+>
+> **已采纳 (1)**：`encode_file` / `encode_file_to_npy` 新增 `num_chunks` 参数，与 `num_processes` 解耦，默认切 `num_processes*16` 块（8 进程→128 块）。块远多于进程后，`Pool` 会让 worker 干完一块就动态领下一块，自然负载均衡，不再被最慢的单块拖住；分片更多、单片更小，落盘版主进程合并的峰值内存也更低。保序性不变（边界仍有序、`imap` 仍保序），结果与串行逐位一致。注：`find_chunk_boundaries` 按 `<|endoftext|>` 对齐并去重，实际块数可能略少于 `num_chunks`，只会变少不会错位。
+>
+> **已采纳 (2)**：用 `Pool(initializer=_init_worker, initargs=(inv_vocab, merge_ranks, special_tokens))` 在每个 worker 启动时只发一次词表，存进进程全局 `_WORKER`；task 随之瘦身成 `(file_path, start, end[, shard, dtype])`，不再携带 32K 词表。词表传输量从「跟块数走」（128 块→128 份）降到「跟进程数走」（8 份），于是 (1) 多切块与省传输不再冲突。已验证与串行逐位一致。
+>
+> **进度可见**：两个并行方法改用 `pool.imap` + `tqdm`（保序不变），按已完成块数实时显示进度条。
+>
+> 并行（含落盘版）结果均已验证与串行 `encode` **逐位一致**。
+
+### (d) 编码训练/验证集为 token id 序列
+
+- **工具**：`BPETokenizer.encode_file_to_npy(in_path, out_path, num_processes=8)`。
+- **要点**：
+  - **低内存**：每个 worker 把自己那段编码成 token id 后**写盘为分片**，主进程按块顺序合并进一个 `np.memmap`，全程不在内存堆积全部 token——这是编码 11GB OWT（数十亿 token，list 版会 OOM）的必要条件。
+  - **dtype**：按词表大小自动选；OWT(32K)/TinyStories(10K) 的最大 id < 65536，用 `uint16`（每 token 2 字节）。
+  - **顺序正确性**：`find_chunk_boundaries` 给出有序、对齐到 `<|endoftext|>` 的边界，分片按索引顺序合并，结果与整段串行编码逐位相同。
+- **用法**：
+
+```python
+tok.encode_file_to_npy("data/owt_train.txt",        "results/owt_train_ids.npy")
+tok.encode_file_to_npy("data/owt_valid.txt",        "results/owt_valid_ids.npy")
+tok.encode_file_to_npy("data/TinyStoriesV2-GPT4-train.txt", "results/ts_train_ids.npy")
+tok.encode_file_to_npy("data/TinyStoriesV2-GPT4-valid.txt", "results/ts_valid_ids.npy")
+# 训练时按需读取，不必全部载入内存：
+ids = np.load("results/owt_train_ids.npy", mmap_mode="r")
+```
+
+- **预估耗时**（按 ~1.3 MB/s 并行）：TinyStories train 2.1GB ≈ 27 分钟；OWT train 11GB ≈ 2.4 小时。
+- **状态**：编码函数已实现并在样本上验证（与串行一致）；全量数据集落盘**尚未执行**，待跑后补上各 `.npy` 的 token 总数与文件大小。
+
+---
+
+# 训练实验日志（§7.1 experiment_log）
+
+## 日志基础设施
+
+- **脚本**：`cs336_basics/train.py`
+- **追踪后端**：Weights & Biases（`--wandb-project` 给定时启用，否则只打印 console）。
+- **双横轴**：每次 `wandb.log(...)` 同时携带
+  - `step=it`（梯度步数）——wandb 默认横轴
+  - `wallclock_sec = time.time() - start_time`（墙钟秒数）——可在面板里把 x 轴切换成它
+  这样**同一个 loss 值同时关联「步数」和「时间」两个坐标**，满足题目「track loss curves w.r.t. gradient steps AND wall-clock time」。
+- **记录的指标**：
+  - `train/loss`（每 `--log-interval` 步）
+  - `valid/loss`（每 `--eval-interval` 步，在 `@torch.no_grad()` + `model.eval()` 下跑 `--eval-batches` 个 batch 求平均）
+  - `lr`（当前 cosine schedule 学习率）
+  - `wallclock_sec`（自训练开始的累计墙钟时间）
+- **超参存档**：`wandb.init(config=vars(args))` 一次性记录全部命令行超参，每个 run 的配置可复现。
+- **为什么要墙钟时间**：仅看「loss vs 步数」会掩盖每步计算成本的差异。做架构 ablation（如换 attention 实现、改 batch size、改 d_model）时，不同配置每步耗时不同，必须用墙钟时间才能公平比较**真实训练效率**。
+
+### 关键代码位置
+- `start_time = time.time()`：循环开始前。
+- train 日志块：`wandb.log({"train/loss":..., "lr":..., "wallclock_sec":elapsed}, step=it)`。
+- valid 日志块：`wandb.log({"valid/loss":..., "lr":..., "wallclock_sec":elapsed}, step=it)`（块内单独计算 `elapsed`）。
+
+### 运行方式
+```bash
+uv run python -m cs336_basics.train \
+  --train-data results/tinystories/ts_train_ids.npy \
+  --valid-data results/tinystories/ts_valid_ids.npy \
+  --device cuda --context-length 256 \
+  --d-model 512 --num-layers 4 --num-heads 16 --d-ff 1344 \
+  --batch-size 64 --max-iters 5000 --lr-max 3e-4 --warmup-iters 200 \
+  --eval-interval 200 --log-interval 20 --checkpoint-dir checkpoints \
+  --wandb-project cs336-a1 --wandb-run-name ts-baseline
+```
+- 离线调试：前缀 `WANDB_MODE=offline`，事后 `wandb sync <run目录>` 补传。
+- 本地无 wandb：不传 `--wandb-project`，仅 console 打印。
+
+## 实验记录表
+
+> 每做一个 ablation 实验追加一行，并附 wandb 曲线截图（步数版 + 时间版各一张）。
+
+| 日期 | 实验名 | 改动 | 关键超参 | 最终 valid loss | 步数 | 墙钟时间 | 结论 |
+|------|--------|------|----------|-----------------|------|----------|------|
+| — | baseline (17M, TinyStories) | 标准配置 | lr=3e-4, d=512, L=4, H=16, ctx=256, bs=64 | _待填_ | _待填_ | _待填_ | 基准线 |
+|  |  |  |  |  |  |  |  |
+
+### 冒烟验证（管线连通性，非正式实验）
+- 小配置（d=128, L=2, H=4, d_ff=256, ctx=64, bs=16）CPU 跑 ~60 步：loss 9.22 → 6.08，train/valid loss、lr、wallclock_sec 均正常上报；checkpoint 保存与 `--resume` 续训验证通过。
+- 仅证明日志/训练/序列化管线正确，**不作为正式 ablation 结果**。
+
+### 待办
+- [ ] 在 GPU 上跑 17M baseline 完整训练，填入上表（valid loss / 步数 / 墙钟时间）。
+- [ ] 后续 §7.x 各 ablation（learning rate sweep、batch size、RoPE/位置编码、RMSNorm、激活函数等）逐条追加。
+- [ ] 每条实验附 wandb loss 曲线截图（gradient-step 横轴 + wall-clock 横轴）。
