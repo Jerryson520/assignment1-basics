@@ -95,6 +95,8 @@ def main():
     parser.add_argument("--max-iters", type=int, default=5000)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--overfit-one-batch", action="store_true")
+
 
     # logging / checkpoint
     parser.add_argument("--log-interval", type=int, default=50)
@@ -136,6 +138,8 @@ def main():
         import wandb
         wandb.init(project=args.wandb_project, name=args.wandb_run_name, config=vars(args))
     start_iter = 0 if args.resume is None else load_checkpoint(args.resume, model, optimizer)
+    if args.overfit_one_batch:
+        fixed_batch = get_batch(train_data, args.batch_size, args.context_length, args.device)
     start_time = time.time()
 
     for it in range(start_iter, args.max_iters):
@@ -143,7 +147,10 @@ def main():
         for group in optimizer.param_groups:
             group["lr"] = lr
         
-        x, y = get_batch(train_data, args.batch_size, args.context_length, args.device)
+        if args.overfit_one_batch:
+            x, y = fixed_batch
+        else:
+            x, y = get_batch(train_data, args.batch_size, args.context_length, args.device)
         logits = model(x)
         loss = cross_entropy(logits, y)
 
