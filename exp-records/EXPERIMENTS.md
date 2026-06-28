@@ -150,14 +150,74 @@ uv run python -m cs336_basics.train \
 
 | 日期 | 实验名 | 改动 | 关键超参 | 最终 valid loss | 步数 | 墙钟时间 | 结论 |
 |------|--------|------|----------|-----------------|------|----------|------|
-| — | baseline (17M, TinyStories) | 标准配置 | lr=3e-4, d=512, L=4, H=16, ctx=256, bs=64 | _待填_ | _待填_ | _待填_ | 基准线 |
-|  |  |  |  |  |  |  |  |
+| 2026-06-28 | baseline (17M, TinyStories) | 标准配置 | lr=3e-4, d=512, L=4, H=16, ctx=256, bs=64 | 1.490 | 20000 | 1904s (~32min, RTX 5090) | 基准线；lr=3e-4 略偏小，未达 ≤1.45 目标 |
+
+## §7.2.1 学习率 sweep（learning_rate）
+
+**硬件**：RTX 5090 单卡。**探路口径**：每条 2000 步（cosine 衰减终点对齐到 2000），其余同 baseline。
+**搜索策略**：先按数量级粗扫 3e-4 → 3e-2，定位谷底区间，再在谷底附近（1e-3~3e-3）细看。
+
+### 探路结果（2000 步）
+
+| LR | valid/loss | train/loss | 墙钟时间 | 状态 |
+|----|-----------|-----------|---------|------|
+| 3e-4 | 2.152 | 2.158 | 185s | 太小，收敛慢 |
+| 6e-4 | 1.919 | 1.879 | 186s | 偏小 |
+| 1e-3 | 1.797 | 1.742 | 186s | 良好 |
+| **2e-3** | **1.739** | **1.646** | 186s | **谷底，最优** |
+| 3e-3 | 1.786 | 1.783 | 186s | 良好 |
+| 1e-2 | 2.535 | 2.405 | 186s | 偏大，变差 |
+| 3e-2 | 3.289 | 3.218 | 186s | 最差，不稳定（train/loss 出现抖动） |
+
+**观察**：valid loss 随 LR 呈 U 形，谷底在 **2e-3** 附近（1e-3~3e-3 均佳）；LR ≥ 1e-2 后性能急剧变差，3e-2 出现训练不稳定（发散迹象）。
+
+### 决赛（最优 LR 跑满 20000 步）
+
+| run | lr-max | valid/loss | train/loss | 步数 | 墙钟时间 | 结论 |
+|-----|--------|-----------|-----------|------|---------|------|
+| **lr-best** | **2e-3** | **1.366** | 1.394 | 20000 | 1901s (~31.7min) | **达标 ≤1.45 ✅**，较 baseline(3e-4=1.49)显著更优 |
+
+谷底 LR（2e-3）跑满步数后 valid=1.366，相比 baseline 的 lr=3e-4（1.49）下降约 0.12，验证了"探路找谷底 → 冠军长跑"策略有效。
+
+### 发散区（大 LR，验证 edge of stability）
+
+| run | lr-max | valid/loss | train/loss | 步数 | 状态 |
+|-----|--------|-----------|-----------|------|------|
+| lr-1e-1 | 1e-1 | 3.923 | 3.726 | 2000 | 严重恶化 |
+| lr-1 | 1.0 | 4.984 | 4.223 | 2000 | 最差，明显跨过稳定边界 |
+
+**(b) edge of stability 结论**：loss 随 LR 增大先降后升——最优 LR（2e-3）正位于性能开始恶化/发散的拐点之下方。继续增大（1e-2→3e-2→1e-1→1.0）loss 单调恶化（2.5→3.3→3.9→5.0）。注：因训练带**梯度裁剪(grad-clip=1.0)+AdamW 归一化**，即便 lr=1.0 也未冲到 nan，而是 loss 高位发散——说明训练栈对大 LR 有较强容忍度，需关闭裁剪/更大 LR 才会出现 nan 级爆炸。
+
+### sweep 曲线
+
+7 条 LR probe（2000 步）train/loss：
+
+![lr sweep train/loss](lr_sweep_train.png)
+
+7 条 LR probe valid/loss：
+
+![lr sweep valid/loss](lr_sweep_valid.png)
+
+最优 LR（2e-3）跑满 20000 步 vs baseline（3e-4）：
+
+![lr-best vs baseline train/loss](lr_best_train.png)
+
+![lr-best vs baseline valid/loss](lr_best_valid.png)
+
+发散区（lr-1 train/loss 冲到 ~180，lr-1e-1 贴底）：
+
+![lr diverge train/loss](lr_diverge_train.png)
 
 ### 冒烟验证（管线连通性，非正式实验）
 - 小配置（d=128, L=2, H=4, d_ff=256, ctx=64, bs=16）CPU 跑 ~60 步：loss 9.22 → 6.08，train/valid loss、lr、wallclock_sec 均正常上报；checkpoint 保存与 `--resume` 续训验证通过。
 - 仅证明日志/训练/序列化管线正确，**不作为正式 ablation 结果**。
 
 ### 待办
-- [ ] 在 GPU 上跑 17M baseline 完整训练，填入上表（valid loss / 步数 / 墙钟时间）。
-- [ ] 后续 §7.x 各 ablation（learning rate sweep、batch size、RoPE/位置编码、RMSNorm、激活函数等）逐条追加。
+- [x] 在 GPU 上跑 17M baseline 完整训练（RTX 5090，valid=1.49，20000 步，~32min）。
+- [x] §7.2.1 learning rate sweep 探路（见上）。
+- [x] §7.2.1 决赛（lr=2e-3，valid=1.366，达标）+ (b) 发散区（lr=1e-1/1.0）。
+- [ ] §7.2.3 batch size 实验（bs=1/16/64/128/256）。
+- [ ] §7.2.3 generate：已用 baseline checkpoint 生成文本。
+- [ ] §7.3 各 ablation（RMSNorm 去除、post-norm、NoPE、SwiGLU→SiLU）。
+- [ ] §7.4 OpenWebText（注意 vocab=32000）。
 - [ ] 每条实验附 wandb loss 曲线截图（gradient-step 横轴 + wall-clock 横轴）。
