@@ -208,6 +208,29 @@ uv run python -m cs336_basics.train \
 
 ![lr diverge train/loss](lr_diverge_train.png)
 
+## §7.2.3 batch size 实验（batch_size_experiment）
+
+**设计**：固定全量 token 预算 327.68M（=batch×iters×256），`max_iters=327.68M/(batch×256)` 反比调整；lr 按 √scaling `2e-3·√(batch/64)`，`lr_min=lr_max/10`。单卡 RTX 5090（32GB）。
+
+| batch | lr_max | max_iters | 状态 | train/loss | valid/loss | wallclock |
+|-------|--------|-----------|------|-----------|-----------|-----------|
+| 16  | 1.0e-3  | 80000 | 完成 | 1.664* | 1.430 | 3820s |
+| 64  | 2.0e-3  | 20000 | 完成 | 1.338 | 1.344 | 1898s |
+| 128 | 2.83e-3 | 10000 | 完成 | 1.335 | **1.343** | 1920s |
+| 256 | 4.0e-3  | 5000  | OOM | — | — | backward 阶段 OOM |
+| 512 | 5.66e-3 | 2500  | OOM | — | — | forward 即 OOM |
+
+\* bs-16 的 train/loss 是末步单个 batch=16 噪声读数，非有效对比量；以 valid 为准。
+
+**结论**：
+1. **显存上限 128~256 之间**——128 是最大可跑档，256 在 iter0 backward OOM（激活随 batch 线性增长）。
+2. **小 batch 双输**——bs-16 valid 最差（1.430）且 wallclock 近 2 倍（3820s），因 GPU 欠载 + 梯度噪声大。
+3. **64/128 是甜点**——valid 几乎相同（1.344/1.343）、墙钟相近（~1900s），固定 token 预算下喂满 GPU 后增大 batch 不再提速但逼近显存上限且不损质量。
+
+### sweep 曲线
+![batch size sweep valid/loss](bs_sweep_valid.png)
+![batch size sweep wallclock](bs_sweep_wallclock.png)
+
 ### 冒烟验证（管线连通性，非正式实验）
 - 小配置（d=128, L=2, H=4, d_ff=256, ctx=64, bs=16）CPU 跑 ~60 步：loss 9.22 → 6.08，train/valid loss、lr、wallclock_sec 均正常上报；checkpoint 保存与 `--resume` 续训验证通过。
 - 仅证明日志/训练/序列化管线正确，**不作为正式 ablation 结果**。
@@ -216,7 +239,7 @@ uv run python -m cs336_basics.train \
 - [x] 在 GPU 上跑 17M baseline 完整训练（RTX 5090，valid=1.49，20000 步，~32min）。
 - [x] §7.2.1 learning rate sweep 探路（见上）。
 - [x] §7.2.1 决赛（lr=2e-3，valid=1.366，达标）+ (b) 发散区（lr=1e-1/1.0）。
-- [ ] §7.2.3 batch size 实验（bs=1/16/64/128/256）。
+- [x] §7.2.3 batch size 实验（bs=16/64/128 完成，256/512 OOM = 显存上限）。
 - [ ] §7.2.3 generate：已用 baseline checkpoint 生成文本。
 - [ ] §7.3 各 ablation（RMSNorm 去除、post-norm、NoPE、SwiGLU→SiLU）。
 - [ ] §7.4 OpenWebText（注意 vocab=32000）。

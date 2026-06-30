@@ -436,3 +436,41 @@ valid/loss：
 ![lr diverge valid/loss](lr_diverge_valid.png)
 
 **结论与意义**：单张 H100 训练完整 GPT-2 XL（400K 步、batch 1024）需约 **200 天**，且 (b) 中已算出单卡 80GB 显存最多只能放下 batch=3——意味着 batch=1024 根本无法在单卡上一次跑完，必须靠梯度累积或更现实地用**多卡数据并行**。这正是大模型预训练必须上集群的根本原因：时间和显存两个维度单卡都扛不住。
+
+---
+
+## Problem (batch_size_experiment)  §7.2.3
+
+**实验设计**：固定 token 预算 = 全量 327,680,000（= batch × max_iters × ctx，ctx=256），改变 batch size，`max_iters = 327.68M /(batch×256)` 反比调整，保证每个 run 看到的 token 数相同、可公平对比。学习率按**平方根缩放** `lr = 2e-3·√(batch/64)`（锚定 §7.2.1 的最优 lr=2e-3@batch64），`lr_min = lr_max/10`，warmup=200。硬件：单卡 RTX 5090（32GB）。
+
+### Deliverable 1：不同 batch 的学习曲线与结果
+
+| batch | lr_max | max_iters | 状态 | valid/loss | wallclock |
+|-------|--------|-----------|------|-----------|-----------|
+| 16  | 1.0e-3  | 80000 | ✅ | 1.430 | 3820s |
+| 64  | 2.0e-3  | 20000 | ✅ | 1.344 | 1898s |
+| 128 | 2.83e-3 | 10000 | ✅ | **1.343** | 1920s |
+| 256 | 4.0e-3  | 5000  | ❌ OOM | — | iter0 后 backward 阶段 OOM |
+| 512 | 5.66e-3 | 2500  | ❌ OOM | — | forward 第一步即 OOM |
+
+学习曲线（valid/loss vs step，`^bs` 筛选）：
+
+![batch size sweep valid/loss](bs_sweep_valid.png)
+
+wall-clock 对比（loss vs wallclock_sec）：
+
+![batch size sweep wallclock](bs_sweep_wallclock.png)
+
+### Deliverable 2：发现与讨论
+
+**1. 显存上限在 128~256 之间。** batch=128 是能跑的最大档；batch=256 在 **iter 0 的 backward 阶段 OOM**（forward 勉强放下，反向需额外存中间激活时溢出），batch=512 连 forward 都放不下。激活显存随 batch **线性增长**，所以 batch 翻倍即逼近物理上限——这就是 "GPU memory limit"。
+
+**2. 小 batch 在「质量」和「速度」两个维度同时吃亏。** batch=16 的 valid loss 最差（1.430 vs 1.34），且 wallclock **几乎是 2 倍**（3820s vs ~1900s）。原因：
+- *速度*：batch 太小时 GPU 严重欠载，单步被 kernel 启动/访存开销主导，单位 token 吞吐低，同样 327M token 反而更慢。
+- *质量*：梯度是少量样本的平均、噪声大，同 token 预算内收敛到更差的 loss。
+
+**3. 中等 batch（64/128）是性价比甜点。** 两者 valid 几乎相同（1.344/1.343）、wallclock 也几乎相同（~1900s），说明在 GPU 已被喂满的区间，固定 token 预算下增大 batch 不再提升墙钟效率，但能在不损失收敛质量的前提下逼近显存上限。配合 √scaling 的 lr，大 batch 既稳定又无欠学。
+
+**4. 与固定 token 预算的关系。** 因为总 token 数固定，理论总算力相近，故 GPU 喂满后（64↑）墙钟趋于一致；只有欠载的小 batch（16）显著偏慢。这印证了「吞吐由硬件利用率决定，而非步数」。
+
+> 注：bs-16 的 train/loss(1.664) > valid(1.430) 仅因 train/loss 是最后一步单个 batch=16 的噪声读数，valid 是 20 batch 平均，后者才是有效对比量。
