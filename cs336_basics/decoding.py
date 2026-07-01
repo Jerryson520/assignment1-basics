@@ -52,8 +52,8 @@ def topp_sampling(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, required=True, help="训练好的 ckpt 路径")
-    parser.add_argument("--vocab", type=str, default="results/tinystories/vocab.json")
-    parser.add_argument("--merges", type=str, default="results/tinystories/merges.txt")
+    parser.add_argument("--vocab", type=str, default="/root/autodl-tmp/cs336/tokenizer/tinystories/vocab.json")
+    parser.add_argument("--merges", type=str, default="/root/autodl-tmp/cs336/tokenizer/tinystories/merges.txt")
     parser.add_argument("--device", type=str, default="cpu")
     # 模型结构需和训练时一致
     parser.add_argument("--vocab-size", type=int, default=10000)
