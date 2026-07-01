@@ -227,6 +227,15 @@ uv run python -m cs336_basics.train \
 2. **小 batch 双输**——bs-16 valid 最差（1.430）且 wallclock 近 2 倍（3820s），因 GPU 欠载 + 梯度噪声大。
 3. **64/128 是甜点**——valid 几乎相同（1.344/1.343）、墙钟相近（~1900s），固定 token 预算下喂满 GPU 后增大 batch 不再提速但逼近显存上限且不损质量。
 
+### 为什么大 batch 没变快、小 batch 反而变慢（吞吐量机理）
+
+固定 token 预算下 `wallclock = 总token / 吞吐量`，总 token 是常数，所以墙钟完全由吞吐量决定。而单步耗时 `t_step ≈ t_固定开销(与batch无关：kernel启动/调度/同步) + t_计算(∝batch)`，分两个区间：
+
+- **小 batch（欠载区）**：计算量小，GPU 大量核闲置，`t_step ≈ t_固定` 近似常数，不随 batch 缩小而同比缩小 → `吞吐 = batch·ctx / t_固定 ∝ batch`。batch 越小吞吐越低，固定开销被反复白付。**bs-16 就在这个区间 → 3820s，近 2 倍。**
+- **大 batch（喂满区）**：GPU 并行单元占满，`t_step ≈ t_计算 ∝ batch` → `吞吐 = batch·ctx /(k·batch) = ctx/k = 常数`（饱和）。batch 翻倍则每步 token 翻倍、每步耗时也翻倍，两者抵消，吞吐封顶。**bs-64→128 落在这段 → 墙钟 1898s≈1920s。**
+
+一句话：**吞吐量在 GPU 喂满后封顶**，故 64→128 没变快；batch 小到 16 时 GPU 欠载、吞吐掉下来，故反而变慢。决定速度的是**硬件利用率**而非 batch 本身。大 batch 真正的加速价值在**分布式数据并行**（切给更多卡），单卡固定预算下喂满即到头。
+
 ### sweep 曲线
 ![batch size sweep valid/loss](bs_sweep_valid.png)
 ![batch size sweep wallclock](bs_sweep_wallclock.png)
