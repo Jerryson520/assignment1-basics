@@ -560,3 +560,13 @@ story is to always share and be kind to others.
 | 无 norm | 1e-4 | 收敛（更慢/更差）| **1.701** |
 
 **结论**：RMSNorm 对深层 Transformer 的训练稳定性**不可或缺**。去掉它并非「无法训练」，而是**稳定训练的学习率上界被大幅压低**——原本可用的 2e-3 直接发散，必须降到 1e-4 才稳定，且收敛更慢、最终 loss 明显更差（1.701 vs 1.366）。因此归一化的真正价值在于：通过约束激活/梯度尺度，同时**扩大可用的学习率裕度**并**提升可达到的最优性能**，而非仅仅决定「能否训练」。
+
+### 交付图：学习曲线
+
+**图 1：去掉 RMSNorm 在原最优 lr=2e-3 下训练**（train/loss，数百步内爆炸至 nan）：
+
+![no-rmsnorm 发散](rmsnorm_off_diverge.png)
+
+**图 2：best learning rate（降到 lr=1e-4）的学习曲线**，对比带 norm 的 lr_best（valid/loss）：
+
+![no-rmsnorm 低 lr 稳定 vs 有 norm](rmsnorm_off_stable.png)
