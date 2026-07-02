@@ -474,3 +474,61 @@ wall-clock 对比（loss vs wallclock_sec）：
 **4. 与固定 token 预算的关系。** 因为总 token 数固定，理论总算力相近，故 GPU 喂满后（64↑）墙钟趋于一致；只有欠载的小 batch（16）显著偏慢。这印证了「吞吐由硬件利用率决定，而非步数」。
 
 > 注：bs-16 的 train/loss(1.664) > valid(1.430) 仅因 train/loss 是最后一步单个 batch=16 的噪声读数，valid 是 20 batch 平均，后者才是有效对比量。
+
+---
+
+## Problem (generate) §7.2
+
+用 §7.2.1 冠军 checkpoint（`lr_best`，valid=1.366）配合 top-p 采样解码。
+
+### Deliverable 1：文本 dump（≥256 token，采样至第一个 `<|endoftext|>` 停止）
+
+解码参数：`temperature=0.8, top-p=0.9`，prompt = `"Lily went to the park and"`
+
+```
+Lily went to the park and saw a boy with a big bag. She wanted to play with the boy,
+but he did not want to share. He said, "This is mine. Go away!" Lily felt sad and
+walked away.
+
+Lily saw a big dog. She wanted to play with the dog, but the boy said, "No, this is
+my park. You can't play with it." Lily felt sad and walked away.
+
+Then, a nice boy came to the park. He saw Lily and the dog playing with the ball. The
+boy said, "I want to play with the dog too!" Lily said, "No, I want to play with the
+dog." The boy got mad and walked away.
+
+Lily did not get to play with the dog. She felt sad and alone. She went to her mom and
+told her what happened. Her mom hugged her and said, "I'm sorry, Lily. The dog was not
+nice to you. He did not know you did not share."
+
+The boy and Lily learned a lesson. They decided to share their toys with other kids
+who did not have fun. They played together and had a great time. The moral of the
+story is to always share and be kind to others.
+<|endoftext|>
+```
+
+### Deliverable 2：流畅度点评
+
+**局部流畅度很高**：语法基本无误、句子完整、对话格式正确，并能自然生成 `<|endoftext|>` 收尾；整体呈现出 TinyStories 典型的「起因→冲突→化解→点题道德」故事结构。**全局连贯性有瑕疵**：存在轻微指代/逻辑不一致（如「the dog was not nice to you. He did not know you did not share」句意自相矛盾），情节偶有跳跃。总体属于「读起来通顺、细看逻辑松散」的水平——对一个 17M 参数、仅在简单儿童故事域上训练的模型而言相当好。
+
+### Deliverable 3：至少两个影响输出质量的因素
+
+**因素一：解码参数（temperature / top-p）。** 实测三档：
+- `temp=0.5, top-p=0.9`：最流畅、最稳，但用词保守、情节套路化、重复度高。
+- `temp=0.8, top-p=0.9`（上文所选）：流畅与多样性的平衡点。
+- `temp=1.0, top-p=0.95`：更有创意（出现 "purple dog Bobo" 等新奇设定），但也更易出现不通顺/逻辑断裂。
+温度越高、top-p 越大 → 采样分布越平、候选越多 → 更多样但更易出错；反之更流畅但更重复。二者直接决定「流畅 vs 多样」的权衡。
+
+**因素二：模型的最终验证损失（训练质量）。** 生成质量正比于模型对数据分布的拟合程度。这里用 valid=1.366 的 `lr_best` 而非 baseline（1.49），更低的 loss 意味着更准的下一 token 分布，输出更连贯。若用欠训练/高 loss 的 checkpoint，同样解码参数下会明显更不通顺。
+
+**（补充）因素三：训练数据域。** TinyStories 是词汇简单、句式规整的合成儿童故事，模型只在此狭窄域内流畅；一旦 prompt 偏离该分布（复杂题材、专业词汇），输出质量会骤降。当前 prompt（"Once upon a time" / "Lily went to the park"）恰好贴合训练分布，是输出流畅的重要前提。
+
+*域外实证（中文 prompt）*：tokenizer 仅在英文 TinyStories 上训练，中文被拆成模型几乎没见过的 UTF-8 字节序列，落在分布极低概率区。实测：
+
+```
+[prompt] 同花顺是一家
+[output] 同花顺是一家.
+<|endoftext|>
+```
+
+同一模型、同一解码参数下，英文 prompt 能续出数百 token 的完整故事，中文 prompt 却连一个有效续写都产生不出、只补一个 `.` 就立即输出 `<|endoftext|>` 结束——输出从「流畅长文」塌缩到「几乎为空」，直观印证了「prompt 偏离训练域 → 质量骤降」。
