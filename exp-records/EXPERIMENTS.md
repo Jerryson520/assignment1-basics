@@ -244,16 +244,17 @@ uv run python -m cs336_basics.train \
 
 对照组复用 `lr_best`（有 norm，valid=1.366）；实验组 `no-rmsnorm` 除 `--no-rmsnorm` 外超参逐字一致（lr=2e-3, batch=64, 20000步）。
 
-| run | norm | 初始 loss | 结果 | 结论 |
-|-----|------|-----------|------|------|
-| lr-best | 有 | ~9.2 (=ln 10000) | valid 1.366 平稳收敛 | 正常 |
-| no-rmsnorm | 无 | **19.8** | iter 300 起剧烈尖峰 → iter 500 loss 196 → iter 850 **nan** | **发散** |
+| run | norm | lr-max | 初始 loss | 结果 | valid/loss |
+|-----|------|--------|-----------|------|-----------|
+| lr-best | 有 | 2e-3 | ~9.2 (=ln 10000) | 平稳收敛 | **1.366** |
+| no-rmsnorm | 无 | 2e-3 | **19.8** | iter 300 尖峰 → 500 loss 196 → 850 **nan** | 发散 |
+| no-rmsnorm-stable | 无 | 1e-4 | ~9.x | 平稳收敛（更慢/更高）| **1.701** |
 
-**发散轨迹**（train/loss）：2.72(250) → 28.6(300) → 196(500) → 2.4e12(650) → nan(850)。
+**发散轨迹**（no-rmsnorm, lr=2e-3, train/loss）：2.72(250) → 28.6(300) → 196(500) → 2.4e12(650) → nan(850)。
 
 **机理**：pre-norm 结构里 RMSNorm 在每个子层入口把输入重缩放到单位 RMS，使残差流的绝对尺度与子层计算解耦、梯度有界。去掉后残差流逐层累加无人拉回 → 激活随深度/步数放大 → 梯度爆炸 → 在 lr=2e-3 下正反馈更新，几百步冲到 inf 再变 nan。初始 loss 19.8（而非 9.2）即未归一化激活尺度已失控的信号。
 
-**结论**：RMSNorm 对深层 Transformer 的**训练稳定性不可或缺**。可选后续：降 lr（如 1e-4）验证「能勉强训但最终 loss 明显劣于有 norm」，说明 norm 主要作用是扩大稳定的 lr 裕度。
+**结论**：RMSNorm 对深层 Transformer 的**训练稳定性不可或缺**。去掉后不是「不能训」，而是**稳定 lr 上界被大幅压低**：把 lr 从 2e-3 降到 1e-4 才不发散（no-rmsnorm-stable），但代价是收敛更慢、最终 valid **1.701 vs 1.366 明显更差**。即 norm 的价值 = 扩大 lr 稳定裕度 + 提升可达最优。
 
 ### 冒烟验证（管线连通性，非正式实验）
 - 小配置（d=128, L=2, H=4, d_ff=256, ctx=64, bs=16）CPU 跑 ~60 步：loss 9.22 → 6.08，train/valid loss、lr、wallclock_sec 均正常上报；checkpoint 保存与 `--resume` 续训验证通过。
