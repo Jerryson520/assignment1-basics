@@ -189,12 +189,12 @@ class MultiHeadAttention(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, d_model:int, num_heads:int, d_ff:int, theta:int, max_seq_len:int):
+    def __init__(self, d_model:int, num_heads:int, d_ff:int, theta:int, max_seq_len:int, use_rmsnorm: bool = True):
         super().__init__()
         assert d_model % num_heads == 0
         d_k = d_model // num_heads
-        self.ln1 = RMSNorm(d_model)
-        self.ln2 = RMSNorm(d_model)
+        self.ln1 = RMSNorm(d_model) if use_rmsnorm else nn.Identity()
+        self.ln2 = RMSNorm(d_model) if use_rmsnorm else nn.Identity()
         self.rope = RotaryPositionalEmbedding(theta, d_k, max_seq_len)
         self.attn = MultiHeadAttentionWithRoPE(d_model, num_heads, self.rope)
         self.ffn = SwiGLU(d_model, d_ff)
@@ -208,11 +208,23 @@ class TransformerBlock(nn.Module):
 
 
 class TransformerLM(nn.Module):
-    def __init__(self, vocab_size: int, context_length: int, d_model:int, num_layers: int, num_heads:int, d_ff:int, theta:int):
+    def __init__(
+        self, 
+        vocab_size: int, 
+        context_length: int, 
+        d_model:int, 
+        num_layers: int, 
+        num_heads:int, 
+        d_ff:int, theta:int,
+        use_rmsnorm: bool = True
+    ):
         super().__init__()
         self.embedding = Embedding(vocab_size, d_model)
-        self.blocks = nn.ModuleList([TransformerBlock(d_model, num_heads, d_ff, theta, context_length) for i in range(num_layers)])
-        self.rmsnorm = RMSNorm(d_model)
+        self.blocks = nn.ModuleList([
+            TransformerBlock(d_model, num_heads, d_ff, theta, context_length, use_rmsnorm=use_rmsnorm) 
+            for i in range(num_layers)
+        ])
+        self.rmsnorm = RMSNorm(d_model) if use_rmsnorm else nn.Identity()
         self.Linear = Linear(d_model, vocab_size)
 
     def forward(self, x: torch.Tensor):
