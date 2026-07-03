@@ -8,9 +8,10 @@ def topp_sampling(
     model: TransformerLM, 
     tokenizer: BPETokenizer, 
     prompt: str, 
-    max_new_tokens:int, 
-    temperature:float, 
-    top_p: float, 
+    max_new_tokens:int,
+    context_length: int,
+    temperature:float,
+    top_p: float,
     eot_token_id: int, 
     device: torch.device, 
     eps=10e-6
@@ -18,7 +19,8 @@ def topp_sampling(
     init_input = torch.tensor(tokenizer.encode(prompt), dtype=torch.long, device=device).unsqueeze(0)
     x = init_input
     while x[0, -1] != eot_token_id and x.shape[-1] <= max_new_tokens + init_input.shape[-1]:
-        logits = model(x)[0, -1]
+        x_cond = x[:, -context_length:]
+        logits = model(x_cond)[0, -1]
         vocab_size = logits.shape[-1]
         max_val = logits.max(dim=-1, keepdim=True).values
         y = (logits - max_val) / (temperature + eps)
@@ -98,6 +100,7 @@ if __name__ == "__main__":
         out = topp_sampling(
             model, tokenizer, prompt,
             max_new_tokens=args.max_new_tokens,
+            context_length=args.context_length,
             temperature=args.temperature,
             top_p=args.top_p,
             eot_token_id=eot_token_id,
