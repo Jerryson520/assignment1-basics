@@ -205,7 +205,7 @@ class TransformerBlock(nn.Module):
         d_k = d_model // num_heads
         self.ln1 = RMSNorm(d_model) if use_rmsnorm else nn.Identity()
         self.ln2 = RMSNorm(d_model) if use_rmsnorm else nn.Identity()
-        self.rope = RotaryPositionalEmbedding(theta, d_k, max_seq_len)
+        self.rope = RotaryPositionalEmbedding(theta, d_k, max_seq_len) if use_rope else None
         self.attn = MultiHeadAttentionWithRoPE(d_model, num_heads, self.rope)
         self.ffn = SwiGLU(d_model, d_ff)
         self.use_prenorm = use_prenorm
@@ -228,12 +228,15 @@ class TransformerLM(nn.Module):
         num_heads:int, 
         d_ff:int, theta:int,
         use_rmsnorm: bool = True,
-        use_prenorm: bool = True
+        use_prenorm: bool = True,
+        use_rope: bool = True,
     ):
         super().__init__()
         self.embedding = Embedding(vocab_size, d_model)
         self.blocks = nn.ModuleList([
-            TransformerBlock(d_model, num_heads, d_ff, theta, context_length, use_rmsnorm=use_rmsnorm, use_prenorm=use_prenorm) 
+            TransformerBlock(
+                d_model, num_heads, d_ff, theta, context_length, 
+                use_rmsnorm=use_rmsnorm, use_prenorm=use_prenorm, use_rope=use_rope) 
             for i in range(num_layers)
         ])
         self.rmsnorm = RMSNorm(d_model) if use_rmsnorm else nn.Identity()
