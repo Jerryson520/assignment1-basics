@@ -627,10 +627,34 @@ story is to always share and be kind to others.
 
 ### Deliverable 2：OWT 生成文本 + 流畅度分析
 
-（待补：用 owt-baseline checkpoint + OWT tokenizer 生成，见下方命令）
+解码参数：`temperature=0.8, top-p=0.9`（生成时需滑动窗口截断到 context_length=256，否则 RoPE 位置缓存越界）。
 
-**为什么同样模型、同样算力，OWT 输出质量更差**（预答，待生成文本佐证）：
-1. **任务本质更难**：OWT 覆盖开放域真实文本，模型要在相同参数量/步数内拟合远更复杂、更高熵的分布，能分到每种模式的容量和梯度更新更少。
-2. **相同 token 预算下欠训练更严重**：OWT 数据量巨大，327M token 只覆盖其中很小一部分，模型远未收敛（valid 仍在降），而 TinyStories 同样预算已接近收敛。
-3. **更大词表加剧稀疏**：32K 词表下许多 token 出现频率低，在有限训练中学得不充分。
-综合导致 OWT 生成的连贯性、语法正确性都弱于 TinyStories。
+**文本 dump**（prompt = `"Once upon a time"`）：
+
+```
+Once upon a time, I said, "Well, if I have a bag, it's pretty cool."
+
+Well, then, "You're a placeholder, do you have a restaurant or bar?" Well, I was
+thinking of something I didn't really know. I didn't know anything about it, it was
+weird, it was kind of cool, and I'd say it was funny, because I was just like, "Yeah,
+I'm not a dude. So if you're a politician, why don't you know what I am about? I am not
+a businessman." I think, I'm not a real person. I don't like being on that level of
+desire. I am not a media tycoon. But I'm not even talking about people who are actually
+really people who are reading that stuff and you don't know what they're doing. I don't
+want to be funny, and I don't want to be funny.
+
+But if you look at the pressure, I'm looking at the heat of things. I think that's
+probably a good thing, but it's one of those things that's always true, and that's a
+real thing.
+```
+
+（另一例 prompt=`"Lily went to the park and"` 通篇围绕 "moon" 反复打转、语义漂移，是不连贯的典型；prompt=`"The little dog"` 则出现 "we're not a dog, we're not a dog" 式重复并最终产出 `<|endoftext|>`。）
+
+**流畅度点评**：**局部（句子级）相当流畅**——语法基本正确、标点/引号规范、用词自然，明显带有真实网页文本的口语腔调。但**全局连贯性差**：话题频繁漂移（"moon" 例）、大量重复与自相矛盾（"I don't want to be funny" 连说两遍、"I'm not a dog and I'm a dog"）、缺乏贯穿的主题或叙事。相比 TinyStories 输出「起因→冲突→化解→点题」的完整小故事结构，OWT 输出更像**语法通顺但语无伦次的意识流**。
+
+**为什么同样模型、同样算力，OWT 输出质量更差**：
+1. **任务本质更难（更高熵的分布）**：OWT 是开放域真实文本，主题/风格/知识极其多样，熵远高于合成的简单儿童故事。相同参数量/步数下，模型只能学到**局部的语言统计规律**（词搭配、句法），学不到长程的主题连贯与事实一致——于是「句子通顺、篇章混乱」。
+2. **相同 token 预算下欠训练严重**：TinyStories 简单且数据量小，327M token 已接近收敛（valid 1.366 接近下限）；OWT 数据量巨大（train .npy 就有 6600 万 token 的验证集、训练集更大），327M token 只覆盖其极小一部分，valid 4.028 且仍在下降——模型远未学好。
+3. **更大词表加剧稀疏**：32K 词表下许多 token 频率低，有限训练中学得不充分，进一步削弱生成质量。
+
+综合：**同样的模型容量和算力被摊到一个更难、更大、更高熵的分布上**，只够学会「局部像人话」，学不会「整体有逻辑」——这正是 OWT 输出连贯性明显劣于 TinyStories 的根因。
