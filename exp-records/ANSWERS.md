@@ -570,3 +570,39 @@ story is to always share and be kind to others.
 **图 2：best learning rate（降到 lr=1e-4）的学习曲线**，对比带 norm 的 lr_best（valid/loss）：
 
 ![no-rmsnorm 低 lr 稳定 vs 有 norm](rmsnorm_off_stable.png)
+
+---
+
+## Problem (pre_norm_ablation) §7.3
+
+**实验**：把每个 block 的 RMSNorm 从子层**前**（pre-norm：`x + sublayer(norm(x))`）移到子层**后**（post-norm：`norm(x + sublayer(x))`），其余超参与 `lr_best` 一致（lr=2e-3, 20000 步）。
+
+**结果**：post-norm **稳定训练但性能更差**——final valid loss **1.405 vs pre-norm 的 1.366**（差约 0.04）。
+
+![post-norm vs pre-norm（含其他消融）](lr-best-vs-norm-postnorm-norope.png)
+
+**讨论**：pre-norm 把归一化放在残差分支内部，使**残差主干（identity path）保持无归一化的干净直连**，梯度可无衰减地回传到浅层，训练更稳、收敛更低。post-norm 每层都在残差相加后再归一化，等于在主干上反复缩放，深层梯度传播较差，最终 loss 偏高。这与现代 LLM 普遍采用 pre-norm 的实践一致。注意在本配置（lr=2e-3）下 post-norm 并未发散，只是收敛到更差的解。
+
+---
+
+## Problem (no_pos_emb) §7.3
+
+**实验**：移除全部 RoPE 位置编码（`--no-rope`，attention 不再对 Q/K 做旋转），其余同 `lr_best`。
+
+**结果**：NoPE **仍能正常训练**，但 final valid loss **1.409 vs 有 RoPE 的 1.366**（差约 0.04）。
+
+![NoPE vs RoPE（含其他消融）](lr-best-vs-norm-postnorm-norope.png)
+
+**讨论**：即使去掉显式位置编码，decoder-only 模型仍可训练——因为**因果掩码本身泄露了位置信息**：每个位置能看到的 token 数量随其绝对位置单调变化，模型可据此隐式推断顺序（NoPE 现象）。但隐式信息弱于 RoPE 提供的显式相对位置，故 valid loss 高约 0.04，说明 RoPE 对该任务确有正向贡献。
+
+---
+
+## Problem (swiglu_ablation) §7.3
+
+**实验**：将门控的 SwiGLU FFN（3 矩阵，`d_ff=1344≈8/3·d_model`）替换为无门控的 SiLU FFN（公式 29：`W2·SiLU(W1 x)`，2 矩阵，`d_ff=2048=4·d_model`）。d_ff 的选取使两者**参数量近似匹配**：SwiGLU `3×1344×512≈2.06M` vs SiLU `2×2048×512≈2.10M`。其余同 `lr_best`。
+
+**结果**：两者**几乎打平，SiLU 甚至微胜**——final valid loss **SiLU 1.355 vs SwiGLU 1.366**（差 0.01，在随机噪声范围内）。
+
+![SwiGLU vs SiLU（含其他消融）](lr-best-vs-norm-postnorm-norope.png)
+
+**讨论**：在参数量匹配的前提下，GLU 门控在 TinyStories 上**未带来可测的性能提升**，两条学习曲线全程几乎重合。这说明门控的收益是任务/规模相关的：在这个词表小、句式简单的合成数据集上，非门控 SiLU 已足够拟合，门控增加的表达力无用武之地。Shazeer 报告的 SwiGLU 优势通常在更大模型、更难语料上才显著体现。结论：本设置下 SwiGLU 与 SiLU 等价，选择门控与否对最终质量无实质影响。

@@ -256,6 +256,26 @@ uv run python -m cs336_basics.train \
 
 **结论**：RMSNorm 对深层 Transformer 的**训练稳定性不可或缺**。去掉后不是「不能训」，而是**稳定 lr 上界被大幅压低**：把 lr 从 2e-3 降到 1e-4 才不发散（no-rmsnorm-stable），但代价是收敛更慢、最终 valid **1.701 vs 1.366 明显更差**。即 norm 的价值 = 扩大 lr 稳定裕度 + 提升可达最优。
 
+## §7.3 消融：post-norm / NoPE / SwiGLU→SiLU
+
+三条实验组均在标准配置（lr=2e-3, batch=64, 20000 步）下只改一个开关，对照组复用 `lr_best`。全部**稳定训练、无发散**。
+
+| run | 改动 | train/loss | valid/loss | wallclock | vs 对照 |
+|-----|------|-----------|-----------|-----------|--------|
+| lr-best（对照）| 标准（prenorm+rope+SwiGLU）| 1.394 | **1.366** | 1900s | — |
+| postnorm | norm 移到子层后 | 1.376 | 1.405 | 1907s | **差 0.039** |
+| norope | 去掉 RoPE | 1.423 | 1.409 | 1829s | **差 0.043** |
+| silu | 无门控 SiLU（d_ff=2048 匹配参数）| 1.378 | **1.355** | 1883s | **优 0.011** |
+
+**曲线**（valid/loss，四条叠加）：
+
+![post-norm / NoPE / SwiGLU vs SiLU 对比](lr-best-vs-norm-postnorm-norope.png)
+
+**结论**：
+- **post-norm（1.405）**：稳定但劣于 pre-norm（1.366）。pre-norm 全程收敛更低更平滑；post-norm 每层归一化在残差之后，深层信号传播更差，最终 loss 高约 0.04。
+- **NoPE（1.409）**：去掉 RoPE 仍能训（causal mask 提供隐式的相对位置信息），但显式位置编码的缺失使 valid 高约 0.04，说明 RoPE 确有正向贡献。
+- **SwiGLU vs SiLU（1.366 vs 1.355）**：参数量匹配下二者**几乎打平，SiLU 甚至微胜**（差异 0.01 在噪声内）。在 TinyStories 这种简单任务上，GLU 门控未带来可见收益——与「门控优势在更大规模/更难任务上才显著」一致。
+
 ### 冒烟验证（管线连通性，非正式实验）
 - 小配置（d=128, L=2, H=4, d_ff=256, ctx=64, bs=16）CPU 跑 ~60 步：loss 9.22 → 6.08，train/valid loss、lr、wallclock_sec 均正常上报；checkpoint 保存与 `--resume` 续训验证通过。
 - 仅证明日志/训练/序列化管线正确，**不作为正式 ablation 结果**。
@@ -267,6 +287,6 @@ uv run python -m cs336_basics.train \
 - [x] §7.2.3 batch size 实验（bs=16/64/128 完成，256/512 OOM = 显存上限）。
 - [ ] §7.2.3 generate：已用 baseline checkpoint 生成文本。
 - [x] §7.3 ablation：RMSNorm 去除（lr=2e-3 直接 nan 发散）。
-- [ ] §7.3 剩余 ablation（post-norm、NoPE、SwiGLU→SiLU）。
+- [x] §7.3 ablation：post-norm（1.405）、NoPE（1.409）、SwiGLU→SiLU（1.355）。
 - [ ] §7.4 OpenWebText（注意 vocab=32000）。
 - [ ] 每条实验附 wandb loss 曲线截图（gradient-step 横轴 + wall-clock 横轴）。
