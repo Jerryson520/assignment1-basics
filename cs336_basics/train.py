@@ -99,6 +99,7 @@ def main():
     parser.add_argument("--no-rmsnorm", action="store_true")
     parser.add_argument("--no-prenorm", action="store_true")
     parser.add_argument("--no-rope", action="store_true")
+    parser.add_argument("--no-swiglu", action="store_true")
 
     # logging / checkpoint
     parser.add_argument("--log-interval", type=int, default=50)
@@ -128,6 +129,7 @@ def main():
         use_rmsnorm=not args.no_rmsnorm,
         use_prenorm=not args.no_prenorm,
         use_rope=not args.no_rope,
+        use_swiglu=not args.no_swiglu,
     )
     model = model.to(args.device)
     optimizer = AdamW(

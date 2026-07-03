@@ -93,6 +93,17 @@ class SwiGLU(nn.Module):
         silu = new_x * torch.sigmoid(new_x)
         return ((silu * (x @ self.weights3.T)) @ self.weights2.T)
 
+class SiLUFFN(nn.Module):
+    def __init__(self, d_model: int, d_ff: int, device: torch.device=None, dtype: torch.dtype=None):
+        super().__init__()
+        self.weights1 = nn.Parameter(_trunc_init(d_ff, d_model, device, dtype))
+        self.weights2 = nn.Parameter(_trunc_init(d_model, d_ff, device, dtype))
+
+    def forward(self, x: torch.Tensor):
+        new_x = x @  self.weights1.T
+        silu = new_x * torch.sigmoid(new_x)
+        return silu @ self.weights2.T
+
 class RotaryPositionalEmbedding(nn.Module):
     def __init__(self, theta: float, d_k: int, max_seq_len: int, device=None):
         super().__init__()
@@ -199,6 +210,7 @@ class TransformerBlock(nn.Module):
         use_rmsnorm: bool = True,
         use_prenorm: bool = True,
         use_rope: bool = True,
+        use_swiglu: bool = True
     ):
         super().__init__()
         assert d_model % num_heads == 0
@@ -207,7 +219,7 @@ class TransformerBlock(nn.Module):
         self.ln2 = RMSNorm(d_model) if use_rmsnorm else nn.Identity()
         self.rope = RotaryPositionalEmbedding(theta, d_k, max_seq_len) if use_rope else None
         self.attn = MultiHeadAttentionWithRoPE(d_model, num_heads, self.rope)
-        self.ffn = SwiGLU(d_model, d_ff)
+        self.ffn = SwiGLU(d_model, d_ff) if use_swiglu else SiLUFFN(d_model, d_ff)
         self.use_prenorm = use_prenorm
     
     def forward(self, x: torch.Tensor):
@@ -230,13 +242,15 @@ class TransformerLM(nn.Module):
         use_rmsnorm: bool = True,
         use_prenorm: bool = True,
         use_rope: bool = True,
+        use_swiglu: bool = True
     ):
         super().__init__()
         self.embedding = Embedding(vocab_size, d_model)
         self.blocks = nn.ModuleList([
             TransformerBlock(
                 d_model, num_heads, d_ff, theta, context_length, 
-                use_rmsnorm=use_rmsnorm, use_prenorm=use_prenorm, use_rope=use_rope) 
+                use_rmsnorm=use_rmsnorm, use_prenorm=use_prenorm, 
+                use_rope=use_rope, use_swiglu=use_swiglu) 
             for i in range(num_layers)
         ])
         self.rmsnorm = RMSNorm(d_model) if use_rmsnorm else nn.Identity()
