@@ -276,6 +276,22 @@ uv run python -m cs336_basics.train \
 - **NoPE（1.409）**：去掉 RoPE 仍能训（causal mask 提供隐式的相对位置信息），但显式位置编码的缺失使 valid 高约 0.04，说明 RoPE 确有正向贡献。
 - **SwiGLU vs SiLU（1.366 vs 1.355）**：参数量匹配下二者**几乎打平，SiLU 甚至微胜**（差异 0.01 在噪声内）。在 TinyStories 这种简单任务上，GLU 门控未带来可见收益——与「门控优势在更大规模/更难任务上才显著」一致。
 
+## §7.4 OpenWebText 主实验
+
+同架构、同训练步数（20000 步），仅把数据换成 OWT、vocab 32000。
+
+| run | 数据 | vocab | train/loss | valid/loss | wallclock |
+|-----|------|-------|-----------|-----------|-----------|
+| lr-best | TinyStories | 10000 | 1.394 | **1.366** | 1900s |
+| owt-baseline | OpenWebText | 32000 | 4.002 | **4.028** | 2604s |
+
+![OWT valid/loss](owt_valid.png)
+
+**要点**：
+- OWT valid 4.028 远高于 TinyStories 1.366，但**两者不可直接比较**——分词器/词表不同（32K vs 10K），loss 是 per-token 交叉熵，词表越大每 token 信息量越大、loss 天然越高；且 OWT 是真实网页文本，多样性和难度远超合成的简单儿童故事。
+- OWT 每步更慢（2604s vs 1900s，同 20000 步）：vocab 32K 使 embedding/LM head 更大，每步 matmul 更重。
+- 曲线平滑单调、无发散，20000 步仍在下降，说明远未收敛（OWT 数据量大，同 token 预算下欠训练）。
+
 ### 冒烟验证（管线连通性，非正式实验）
 - 小配置（d=128, L=2, H=4, d_ff=256, ctx=64, bs=16）CPU 跑 ~60 步：loss 9.22 → 6.08，train/valid loss、lr、wallclock_sec 均正常上报；checkpoint 保存与 `--resume` 续训验证通过。
 - 仅证明日志/训练/序列化管线正确，**不作为正式 ablation 结果**。

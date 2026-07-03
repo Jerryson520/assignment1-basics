@@ -606,3 +606,31 @@ story is to always share and be kind to others.
 ![SwiGLU vs SiLU（含其他消融）](lr-best-vs-norm-postnorm-norope.png)
 
 **讨论**：在参数量匹配的前提下，GLU 门控在 TinyStories 上**未带来可测的性能提升**，两条学习曲线全程几乎重合。这说明门控的收益是任务/规模相关的：在这个词表小、句式简单的合成数据集上，非门控 SiLU 已足够拟合，门控增加的表达力无用武之地。Shazeer 报告的 SwiGLU 优势通常在更大模型、更难语料上才显著体现。结论：本设置下 SwiGLU 与 SiLU 等价，选择门控与否对最终质量无实质影响。
+
+---
+
+## Problem (main_experiment) §7.4
+
+在 OpenWebText 上训练，模型架构与总训练步数与 TinyStories 完全相同（d_model=512, 4 层, 16 头, ctx=256, batch=64, 20000 步, lr=2e-3），仅数据换成 OWT、vocab=32000。
+
+### Deliverable 1：学习曲线 + loss 差异解读
+
+![OWT valid/loss 学习曲线](owt_valid.png)
+
+最终 **valid loss = 4.028**（train 4.002），对比 TinyStories 的 **1.366**。
+
+**如何解读这两个 loss**：**不能直接比较绝对数值**，原因有二：
+1. **分词器/词表不同**（OWT 32K vs TinyStories 10K）。loss 是 per-token 交叉熵；词表越大，每个 token 携带的信息越多，被正确预测的难度越高，per-token loss 自然更大。两个 loss 处在不同的「单位」下。
+2. **数据分布难度不同**。TinyStories 是词汇受限、句式规整的合成儿童故事，高度可预测；OWT 是真实网页文本，主题、风格、词汇极其多样，本质上更难建模。
+
+因此 4.028 > 1.366 同时反映了「更大词表」与「更难数据」两个因素，而非模型质量差 3 倍。更合理的解读方式是看**每条曲线自身的下降趋势**：OWT 曲线 20000 步仍在平滑下降、远未收敛，说明在相同 token 预算下 OWT 属于欠训练（数据量远大于 TinyStories）。
+
+### Deliverable 2：OWT 生成文本 + 流畅度分析
+
+（待补：用 owt-baseline checkpoint + OWT tokenizer 生成，见下方命令）
+
+**为什么同样模型、同样算力，OWT 输出质量更差**（预答，待生成文本佐证）：
+1. **任务本质更难**：OWT 覆盖开放域真实文本，模型要在相同参数量/步数内拟合远更复杂、更高熵的分布，能分到每种模式的容量和梯度更新更少。
+2. **相同 token 预算下欠训练更严重**：OWT 数据量巨大，327M token 只覆盖其中很小一部分，模型远未收敛（valid 仍在降），而 TinyStories 同样预算已接近收敛。
+3. **更大词表加剧稀疏**：32K 词表下许多 token 出现频率低，在有限训练中学得不充分。
+综合导致 OWT 生成的连贯性、语法正确性都弱于 TinyStories。
