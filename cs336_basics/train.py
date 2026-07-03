@@ -97,6 +97,7 @@ def main():
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--overfit-one-batch", action="store_true")
     parser.add_argument("--no-rmsnorm", action="store_true")
+    parser.add_argument("--no-prenorm", action="store_true")
 
     # logging / checkpoint
     parser.add_argument("--log-interval", type=int, default=50)
@@ -123,7 +124,9 @@ def main():
         num_heads=args.num_heads,
         d_ff = args.d_ff,
         theta=args.theta,
-        use_rmsnorm=not args.no_rmsnorm
+        use_rmsnorm=not args.no_rmsnorm,
+        use_prenorm=not args.no_prenorm,
+        
     )
     model = model.to(args.device)
     optimizer = AdamW(

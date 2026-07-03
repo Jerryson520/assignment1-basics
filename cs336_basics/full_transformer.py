@@ -189,7 +189,17 @@ class MultiHeadAttention(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, d_model:int, num_heads:int, d_ff:int, theta:int, max_seq_len:int, use_rmsnorm: bool = True):
+    def __init__(
+        self, 
+        d_model:int, 
+        num_heads:int, 
+        d_ff:int, 
+        theta:int, 
+        max_seq_len:int, 
+        use_rmsnorm: bool = True,
+        use_prenorm: bool = True,
+        use_rope: bool = True,
+    ):
         super().__init__()
         assert d_model % num_heads == 0
         d_k = d_model // num_heads
@@ -198,12 +208,13 @@ class TransformerBlock(nn.Module):
         self.rope = RotaryPositionalEmbedding(theta, d_k, max_seq_len)
         self.attn = MultiHeadAttentionWithRoPE(d_model, num_heads, self.rope)
         self.ffn = SwiGLU(d_model, d_ff)
+        self.use_prenorm = use_prenorm
     
     def forward(self, x: torch.Tensor):
         seq_len = x.shape[-2]
         token_positions = torch.arange(seq_len, device=x.device)
-        y1 = x + self.attn(self.ln1(x), token_positions)
-        y = y1 + self.ffn(self.ln2(y1))
+        y1 = x + self.attn(self.ln1(x), token_positions) if self.use_prenorm else self.ln1(x + self.attn(x, token_positions))
+        y = y1 + self.ffn(self.ln2(y1)) if self.use_prenorm else self.ln2(y1 + self.ffn(y1))
         return y
 
 
@@ -216,12 +227,13 @@ class TransformerLM(nn.Module):
         num_layers: int, 
         num_heads:int, 
         d_ff:int, theta:int,
-        use_rmsnorm: bool = True
+        use_rmsnorm: bool = True,
+        use_prenorm: bool = True
     ):
         super().__init__()
         self.embedding = Embedding(vocab_size, d_model)
         self.blocks = nn.ModuleList([
-            TransformerBlock(d_model, num_heads, d_ff, theta, context_length, use_rmsnorm=use_rmsnorm) 
+            TransformerBlock(d_model, num_heads, d_ff, theta, context_length, use_rmsnorm=use_rmsnorm, use_prenorm=use_prenorm) 
             for i in range(num_layers)
         ])
         self.rmsnorm = RMSNorm(d_model) if use_rmsnorm else nn.Identity()
