@@ -301,8 +301,8 @@ uv run python -m cs336_basics.train \
 - [x] §7.2.1 learning rate sweep 探路（见上）。
 - [x] §7.2.1 决赛（lr=2e-3，valid=1.366，达标）+ (b) 发散区（lr=1e-1/1.0）。
 - [x] §7.2.3 batch size 实验（bs=16/64/128 完成，256/512 OOM = 显存上限）。
-- [ ] §7.2.3 generate：已用 baseline checkpoint 生成文本。
+- [x] §7.2 generate：TinyStories + OWT 均已生成文本并分析。
 - [x] §7.3 ablation：RMSNorm 去除（lr=2e-3 直接 nan 发散）。
 - [x] §7.3 ablation：post-norm（1.405）、NoPE（1.409）、SwiGLU→SiLU（1.355）。
-- [ ] §7.4 OpenWebText（注意 vocab=32000）。
+- [x] §7.4 OpenWebText 主实验（vocab=32000，valid 4.028）。
 - [ ] 每条实验附 wandb loss 曲线截图（gradient-step 横轴 + wall-clock 横轴）。
